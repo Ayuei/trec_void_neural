@@ -1,0 +1,7 @@
+pysolr
+numpy
+segtok
+tqdm
+plac
+elasticsearch
+pandas

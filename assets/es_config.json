@@ -18,7 +18,11 @@
       "fulltext": {
         "type": "text"
       },
-      "text_vector": {
+      "title_embedding": {
+        "type": "dense_vector",
+        "dims": 768
+      },
+      "abstract_embedding": {
         "type": "dense_vector",
         "dims": 768
       }

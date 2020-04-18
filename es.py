@@ -8,53 +8,114 @@ from segtok.segmenter import split_single
 from bert_serving.client import BertClient
 import numpy as np
 import asyncio
+import logging
+import traceback
+
+logging.basicConfig()
+logging.getLogger().setLevel(logging.WARN)
 
 es_client = Elasticsearch()
-bc = BertClient()
+bc = BertClient(port=51234, port_out=51235)
 
 
-async def index_documents(parsed_ids, df, index_name):
+async def index_documents(parsed_ids, df, index_name, valid_ids):
     with open("parsed_docs.txt", 'a+') as logfile:
-        for _, row in tqdm(df.iterrows()):
-            _id = row['cord_uid']
-            if _id in parsed_ids:
-                continue
+        for _, row in tqdm(df.iterrows(), total=len(valid_ids)):
+            doc = None
+            try:
+                _id = row['cord_uid'].strip()
+                if not valid_ids[_id] or _id in parsed_ids:
+                    logging.warn(f'Skipping {_id} as it\'s already indexed')
+                    continue
 
-            doc = CovidParser.parse(row)
-            await asyncio.sleep(0.5)
-            sentences = split_single(f"{doc['title']}\n {doc['abstract']}"
-                                     .replace('\n', ' '))
-            encodings = bc.encode(sentences)
-            doc['text_vector'] = np.mean(encodings, axis=1)
+                doc = CovidParser.parse(row)
+                await asyncio.sleep(0.5)
 
-            await asyncio.sleep(0.1)
-            es_client.index(index=index_name, id=_id, body=doc)
-            logfile.write(f'{_id}\n')
+                title_exists = True
+                if pd.isnull(doc['title']):
+                    logging.warn('{_id} has no title')
+                    doc['title'] = ''
+                    title_exists = False
+
+                abstract_exists = True
+                if doc['abstract'].lower() == 'Unknown' or len(doc['abstract'].strip()) == 0:
+                    logging.warn('{_id} has no abstract')
+                    abstract_exists = False
+
+                sentences = []
+
+                if abstract_exists:
+                    sentences = split_single(doc['abstract'])
+
+                if title_exists:
+                    sentences.insert(0, doc['title'])
+
+                if sentences:
+                    encodings = bc.encode(sentences)
+
+                if abstract_exists:
+                    doc['title_embedding'] = encodings[0].tolist() if title_exists else [0]*768
+                else:
+                    doc['title_embedding'] = encodings.tolist()[0] if title_exists else [0]*768
+
+                if abstract_exists:
+                    if title_exists:
+                        doc['abstract_embedding'] = np.mean(np.delete(encodings,0,0), axis=0).tolist()
+                    else:
+                        doc['abstract_embedding'] = np.mean(encodings, axis=0).tolist()
+                else:
+                    doc['abstract_embedding'] = [0]*768
+
+                assert len(doc['title_embedding']) == 768
+                assert len(doc['abstract_embedding']) == 768
+
+                await asyncio.sleep(0.1)
+                es_client.index(index=index_name, id=_id, body=doc)
+                logfile.write(f'{_id}\n')
+            except Exception as e:
+                import pdb; pdb.set_trace()
+                logging.critical(traceback.format_exc())
+                logging.critical(f'Some unknown error occured, skipping {_id} and continuing')
 
 
-def create_es_index(index_file, index_name):
+def create_es_index(index_file, index_name, delete=False):
     with open(index_file) as idx_file:
+        if es_client.indices.exists(index_name):
+            if delete:
+                es_client.indices.delete(index_name)
+                import os
+                os.remove('parsed_docs.txt')
+                open('parsed_docs.txt', 'w+').close() # create empty file
+                logging.warn('Deleting old index')
+            else:
+                return
         source = idx_file.read().strip()
         es_client.indices.create(index=index_name, body=source)
 
 
 @plac.annotations(
-    metafile=('positional', 'Path to metadata', None, Path),
-    index_config=('positional', 'Mappings for ES Index', None, Path),
-    index_name=('positional', 'Index Name', None, Path)
+    metafile=('Path to metadata','positional', None, Path),
+    index_config=('Mappings for ES Index', 'positional', None, Path),
+    delete_index=('Delete past index', 'flag', None),
+    index_name=('Index Name', 'positional', None, Path)
 )
-def main(metafile: Path = Path('dataset-week1/metadata.csv'),
+def main(metafile: Path = Path('covid-april-10/metadata.csv'),
          index_config: Path = Path('assets/es_config.json'),
-         index_name: str = 'covid-april-10'):
+         delete_index: bool=False,
+         index_name: str = 'covid-april-10',
+         valid_id_path: str = 'covid-april-10/docids-rnd1.txt'):
 
     assert metafile.exists()
     assert index_config.exists()
 
-    create_es_index(index_config, index_name)
+    create_es_index(index_config, index_name, delete=delete_index)
     df = pd.read_csv(metafile, index_col=None)
-    parsed_ids = open('parsed_docs.txt', 'r+').readlines()
+    parsed_ids = list(map(lambda k: k.strip(), open('parsed_docs.txt', 'r+').readlines()))
+    valid_ids = open(valid_id_path).readlines()
 
-    asyncio.run(index_documents(parsed_ids, df, index_name))
+    valid_ids = {_id.strip(): True for _id in open(valid_id_path).readlines()}
+
+    asyncio.run(index_documents(parsed_ids, df, index_name, valid_ids))
 
 
 if __name__ == '__main__':

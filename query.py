@@ -11,7 +11,10 @@ import numpy as np
 # Final score = log(BM25 of query/question/narrative) + cosine(query, doc_title) + cosine(question, doc_title) + cosine(narr, doc_title)
 # + cosine(query, doc_abstract) + cosine(question, doc_abstract) + cosine(narr, doc_abstract)
 # Log on bm25 is used as it generally gives a score from 0 - 6 which is the range of our cosine similarity
-def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb):
+def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb, cosine_weights, query_weights):
+    assert len(query_weights) == 9
+    assert len(cosine_weights) == 6
+
     return {
         "query": {
             "script_score": {
@@ -20,16 +23,21 @@ def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb):
                         # Match on title, abstract and fulltext on all three fields
                         # Weights should be added later
                         "should": [
-                            {"match": {"title": q}},
-                            {"match": {"title": qstn}},
-                            {"match": {"title": narr}},
-                            {"match": {"abstract": q}},
-                            {"match": {"abstract": qstn}},
-                            {"match": {"abstract": narr}},
-                            {"match": {"fulltext": q}},
-                            {"match": {"fulltext": qstn}},
-                            {"match": {"fulltext": narr}},
-                        ]
+                            {"match": {"title": {"query": q, "boost": query_weights[0]}}},
+                            {"match": {"title": {"query": qstn, "boost": query_weights[1]}}},
+                            {"match": {"title": {"query": narr, "boost": query_weights[2]}}},
+                            {"match": {"abstract": {"query": q, "boost": query_weights[3]}}},
+                            {"match": {"abstract": {"query": qstn, "boost": query_weights[4]}}},
+                            {"match": {"abstract": {"query": narr, "boost": query_weights[5]}}},
+                            {"match": {"fulltext": {"query": q, "boost": query_weights[6]}}},
+                            {"match": {"fulltext": {"query": qstn, "boost": query_weights[7]}}},
+                            {"match": {"fulltext": {"query": narr, "boost": query_weights[8]}}},
+                        ],
+                        "filter": {
+                            "range": {
+                                "date": {"gte": "2019-12-31"},
+                            }
+                        }
                     }
                 },
                 "script":{
@@ -41,6 +49,13 @@ def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb):
                     # PRIVATE but ALSO encoded in BINARY that non-trivally decoded.
                     # Weights should be added later
                     "source": """
+                               def weights = params.weights;
+                               // If document score is zero, don't do score calculation
+                               // Filter query has set it to zero
+                               if (Math.signum(_score) == 0){
+                                   return 0.0;
+                               }
+
                                double q_t = dotProduct(params.q_eb, 'title_embedding');
                                double qstn_t = dotProduct(params.qstn_eb, 'title_embedding');
                                double narr_t = dotProduct(params.narr_eb, 'title_embedding');
@@ -49,27 +64,27 @@ def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb):
                                double narr_abs = dotProduct(params.narr_eb, 'abstract_embedding');
 
                                if (Math.signum(q_t) != 0){
-                                   q_t = cosineSimilarity(params.q_eb, 'title_embedding');
+                                   q_t = weights[0]*cosineSimilarity(params.q_eb, 'title_embedding');
                                }
 
                                if (Math.signum(qstn_t) != 0){
-                                   qstn_t = cosineSimilarity(params.qstn_eb, 'title_embedding');
+                                   qstn_t = weights[1]*cosineSimilarity(params.qstn_eb, 'title_embedding');
                                }
 
                                if (Math.signum(narr_t) != 0){
-                                   narr_t = cosineSimilarity(params.narr_eb, 'title_embedding');
+                                   narr_t = weights[2]*cosineSimilarity(params.narr_eb, 'title_embedding');
                                }
 
                                if (Math.signum(q_abs) != 0){
-                                   q_abs = cosineSimilarity(params.q_eb, 'abstract_embedding');
+                                   q_abs = weights[3]*cosineSimilarity(params.q_eb, 'abstract_embedding');
                                }
 
                                if (Math.signum(qstn_abs) != 0){
-                                   qstn_abs = cosineSimilarity(params.qstn_eb, 'abstract_embedding');
+                                   qstn_abs = weights[4]*cosineSimilarity(params.qstn_eb, 'abstract_embedding');
                                }
 
                                if (Math.signum(narr_abs) != 0){
-                                   narr_abs = cosineSimilarity(params.narr_eb, 'abstract_embedding');
+                                   narr_abs = weights[5]*cosineSimilarity(params.narr_eb, 'abstract_embedding');
                                }
 
                                return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + Math.log(_score);
@@ -79,6 +94,7 @@ def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb):
                         "q_eb": q_eb,
                         "qstn_eb": qstn_eb,
                         "narr_eb": narr_eb,
+                        "weights": cosine_weights,
                     }
                 }
             }
@@ -98,7 +114,9 @@ async def generate_embedding(bc, text):
     return [0]*768
 
 
-async def run_all_queries(topics, es_client, bert_client, index_name):
+async def run_all_queries(topics, es_client, bert_client, index_name,
+        cosine_weights=[1]*6, query_weights=[1]*9,
+        size=1000, tune:bool=False):
     for topic_num, topic in tqdm(enumerate(topics, start=1), desc="Running Queries"):
         query = topic['query']
         question = topic['question']
@@ -113,14 +131,19 @@ async def run_all_queries(topics, es_client, bert_client, index_name):
                                  narrative,
                                  query_embedding,
                                  question_embedding,
-                                 narrative_embedding)
+                                 narrative_embedding,
+                                 cosine_weights,
+                                 query_weights)
 
         logging.debug(f'Running query')
         logging.debug(f'{final_q}')
 
         # Async query so we can run multiple requests at once
-        results = await es_client.search(index=index_name, body=final_q, size=1000)
-        serialise_results(topic, topic_num, results)
+        results = await es_client.search(index=index_name, body=final_q, size=size)
+        if not tune:
+            serialise_results(topic, topic_num, results)
+        else:
+            evaluate(topic, topic_num, results)
 
 
 def serialise_results(topic, topic_num, results):
@@ -156,15 +179,20 @@ def parse_topics(qt_path):
 
     return qtopics
 
+def tune_wrapper(event_loop, es_client, topics, bc, index_name):
+    def run_query_wrapper(*args, **kwargs):
+        event_loop.run_until_complete(run_all_queries(topics, es_client, bc, index_name))
 
 @plac.annotations(
     query_topics=('path to query topics', 'positional', None, Path),
     index_name=('index name to query', 'option', None, str),
-    debug=('index name to query', 'flag')
+    debug=('index name to query', 'flag'),
+    tune=('path to truth labels', 'positional', None, Path)
 )
 def main(query_topics: Path="assets/topics-rnd1.xml",
-        index_name: str="covid-april-10",
-        debug: bool=False):
+        index_name: str="covid-april-10-dated",
+        debug: bool=False,
+        tune=Path=""):
 
     if debug:
         # DEBUG logs shows elasticsearch exceptions
@@ -177,10 +205,12 @@ def main(query_topics: Path="assets/topics-rnd1.xml",
     #assert asyncio.run(index_exists(es_client, index_name))
 
     topics = parse_topics(query_topics)
+    loop = asyncio.get_event_loop()
 
+    if tune:
+        tune_wrapper(loop, es_client, topics, bc, index_name)
     # Run our queries asyncronously as the bottleneck is the queries themselves
     # While we wait on our queries, we can prepare the next few.
-    loop = asyncio.get_event_loop()
     loop.run_until_complete(run_all_queries(topics, es_client, bc, index_name))
     loop.run_until_complete(es_client.transport.close())
     loop.close()

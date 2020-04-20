@@ -5,3 +5,7 @@ tqdm
 plac
 elasticsearch
 pandas
+bert-serving-server
+bert-serving-client
+aioelasticsearch
+protobuf

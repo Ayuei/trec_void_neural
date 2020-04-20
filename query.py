@@ -8,19 +8,17 @@ import logging
 from tqdm import tqdm
 import numpy as np
 
-#logging.getLogger().setLevel(logging.DEBUG)
-
-
-bc = None
-
-# Final score = Log(BM25 of query/question/narrative) + cosine(q, d) + cosine(qu, d) + cosine(na, d)
+# Final score = log(BM25 of query/question/narrative) + cosine(query, doc_title) + cosine(question, doc_title) + cosine(narr, doc_title)
+# + cosine(query, doc_abstract) + cosine(question, doc_abstract) + cosine(narr, doc_abstract)
+# Log on bm25 is used as it generally gives a score from 0 - 6 which is the range of our cosine similarity
 def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb):
     return {
         "query": {
             "script_score": {
                 "query": {
-                    #"match_all": {}
                     "bool": {
+                        # Match on title, abstract and fulltext on all three fields
+                        # Weights should be added later
                         "should": [
                             {"match": {"title": q}},
                             {"match": {"title": qstn}},
@@ -36,6 +34,12 @@ def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb):
                 },
                 "script":{
                     "lang": "painless",
+                    # Compute dotproducts as some Vectors are zero vectors
+                    # Use dotproducts as a proxy to see if we're able to compute the cosine similarity
+                    # Otherwise return 0
+                    # We have to do this as the values of Vectors in elasticsearch are not only
+                    # PRIVATE but ALSO encoded in BINARY that non-trivally decoded.
+                    # Weights should be added later
                     "source": """
                                double q_t = dotProduct(params.q_eb, 'title_embedding');
                                double qstn_t = dotProduct(params.qstn_eb, 'title_embedding');
@@ -81,26 +85,28 @@ def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb):
         }
     }
 
-async def generate_embedding(text):
+async def generate_embedding(bc, text):
     if text:
+        # Running sleep here allows us to run all embedding requests at once
         await asyncio.sleep(0.5)
         arr = np.squeeze(bc.encode([text])).tolist()
         assert len(arr) == 768
 
         return arr
 
+    # Return zero vector if no text
     return [0]*768
 
 
-async def run_all_queries(topics, es_client, index_name):
+async def run_all_queries(topics, es_client, bert_client, index_name):
     for topic_num, topic in tqdm(enumerate(topics, start=1), desc="Running Queries"):
         query = topic['query']
         question = topic['question']
         narrative = topic['narrative']
 
-        query_embedding = await generate_embedding(query)
-        question_embedding = await generate_embedding(question)
-        narrative_embedding = await generate_embedding(narrative)
+        query_embedding = await generate_embedding(bert_client, query)
+        question_embedding = await generate_embedding(bert_client, question)
+        narrative_embedding = await generate_embedding(bert_client, narrative)
 
         final_q = generate_query(query,
                                  question,
@@ -111,19 +117,17 @@ async def run_all_queries(topics, es_client, index_name):
 
         logging.debug(f'Running query')
         logging.debug(f'{final_q}')
-        results = await es_client.search(index=index_name, body=final_q, size=1000)
 
+        # Async query so we can run multiple requests at once
+        results = await es_client.search(index=index_name, body=final_q, size=1000)
         serialise_results(topic, topic_num, results)
 
 
 def serialise_results(topic, topic_num, results):
     with open('results.txt', 'a+') as writer:
-        #dict_keys(['id', 'title', 'fulltext', 'abstract', 'date', 'title_embedding',
-        #    'abstract_embedding'])
-        #results['hits']['hits'][0]['_source']['id']
         for rank, result in enumerate(results['hits']['hits'], start=1):
             doc = result['_source']
-            line = f"{topic_num}\tQ0\t{doc['id']}\t{rank}\t{result['_score']}\tBLARG\n"
+            line = f"{topic_num}\tQ0\t{doc['id']}\t{rank}\t{result['_score']}\tINSERT_RUN_NAME\n"
             writer.write(line)
 
 
@@ -155,12 +159,18 @@ def parse_topics(qt_path):
 
 @plac.annotations(
     query_topics=('path to query topics', 'positional', None, Path),
-    index_name=('index name to query', 'option', None, str)
+    index_name=('index name to query', 'option', None, str),
+    debug=('index name to query', 'flag')
 )
-def main(query_topics: Path="assets/topics-rnd1.xml", index_name: str="covid-april-10"):
-    es_client = Elasticsearch(hosts=['localhost'])
+def main(query_topics: Path="assets/topics-rnd1.xml",
+        index_name: str="covid-april-10",
+        debug: bool=False):
 
-    global bc
+    if debug:
+        # DEBUG logs shows elasticsearch exceptions
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    es_client = Elasticsearch(hosts=['localhost'])
     bc = BertClient(port=51234, port_out=51235)
 
     assert query_topics.exists()
@@ -171,10 +181,9 @@ def main(query_topics: Path="assets/topics-rnd1.xml", index_name: str="covid-apr
     # Run our queries asyncronously as the bottleneck is the queries themselves
     # While we wait on our queries, we can prepare the next few.
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_all_queries(topics, es_client, index_name))
+    loop.run_until_complete(run_all_queries(topics, es_client, bc, index_name))
     loop.run_until_complete(es_client.transport.close())
     loop.close()
-    #asyncio.run(run_all_queries(topics, es_client, index_name))
 
 if __name__ == '__main__':
     plac.call(main)

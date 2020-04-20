@@ -28,15 +28,17 @@ async def index_documents(parsed_ids, df, index_name, valid_ids):
                     logging.warn(f'Skipping {_id} as it\'s already indexed')
                     continue
 
+                # Parse the document fields
                 doc = CovidParser.parse(row)
                 await asyncio.sleep(0.5)
 
                 title_exists = True
-                if pd.isnull(doc['title']):
+                if pd.isnull(doc['title']): # Check if a title exists
                     logging.warn('{_id} has no title')
                     doc['title'] = ''
                     title_exists = False
 
+                # Check if abstract exists before performing code that requires it to be non-empty
                 abstract_exists = True
                 if doc['abstract'].lower() == 'Unknown' or len(doc['abstract'].strip()) == 0:
                     logging.warn('{_id} has no abstract')
@@ -48,14 +50,17 @@ async def index_documents(parsed_ids, df, index_name, valid_ids):
                     sentences = split_single(doc['abstract'])
 
                 if title_exists:
+                    # Batch to save memory and requests
                     sentences.insert(0, doc['title'])
 
                 if sentences:
                     encodings = bc.encode(sentences)
 
                 if abstract_exists:
+                    # if abstract, then title is the first element/vector
                     doc['title_embedding'] = encodings[0].tolist() if title_exists else [0]*768
                 else:
+                    # If not abstract, the title is the only vector
                     doc['title_embedding'] = encodings.tolist()[0] if title_exists else [0]*768
 
                 if abstract_exists:
@@ -64,16 +69,17 @@ async def index_documents(parsed_ids, df, index_name, valid_ids):
                     else:
                         doc['abstract_embedding'] = np.mean(encodings, axis=0).tolist()
                 else:
+                    # Default to zero vector is no abstract
                     doc['abstract_embedding'] = [0]*768
 
                 assert len(doc['title_embedding']) == 768
                 assert len(doc['abstract_embedding']) == 768
 
+                # Embedding is the bottleneck, so we can perform multiple requests before indexing
                 await asyncio.sleep(0.1)
                 es_client.index(index=index_name, id=_id, body=doc)
                 logfile.write(f'{_id}\n')
             except Exception as e:
-                import pdb; pdb.set_trace()
                 logging.critical(traceback.format_exc())
                 logging.critical(f'Some unknown error occured, skipping {_id} and continuing')
 
@@ -110,11 +116,12 @@ def main(metafile: Path = Path('covid-april-10/metadata.csv'),
 
     create_es_index(index_config, index_name, delete=delete_index)
     df = pd.read_csv(metafile, index_col=None)
+
+    # Keep a list of parsed documents that we have processed in the event of a crash
     parsed_ids = list(map(lambda k: k.strip(), open('parsed_docs.txt', 'r+').readlines()))
     valid_ids = open(valid_id_path).readlines()
 
     valid_ids = {_id.strip(): True for _id in open(valid_id_path).readlines()}
-
     asyncio.run(index_documents(parsed_ids, df, index_name, valid_ids))
 
 

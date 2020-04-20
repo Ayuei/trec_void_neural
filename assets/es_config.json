@@ -4,10 +4,6 @@
     "number_of_replicas": 1
   },
   "mappings": {
-    "dynamic": "true",
-    "_source": {
-      "enabled": "true"
-    },
     "properties": {
       "title": {
         "type": "text"
@@ -17,6 +13,9 @@
       },
       "fulltext": {
         "type": "text"
+      },
+      "date": {
+        "type": "date"
       },
       "title_embedding": {
         "type": "dense_vector",

@@ -7,13 +7,33 @@ from bert_serving.client import BertClient
 import logging
 from tqdm import tqdm
 import numpy as np
+from joblib import Memory
+from utils import hyperparam_utils
+from hyperopt import hp
+from ray.tune import track
+from ray import tune
+from ray.tune.suggest.hyperopt import HyperOptSearch
+from ray.tune.schedulers import AsyncHyperBandScheduler
+
+CACHE_DIR='./cache'
+memory = Memory(CACHE_DIR, verbose=0)
+
+
+def use_memory_cache(func):
+    memory_cache_func = memory.cache(func)
+    return memory_cache_func
+
 
 # Final score = log(BM25 of query/question/narrative) + cosine(query, doc_title) + cosine(question, doc_title) + cosine(narr, doc_title)
 # + cosine(query, doc_abstract) + cosine(question, doc_abstract) + cosine(narr, doc_abstract)
 # Log on bm25 is used as it generally gives a score from 0 - 6 which is the range of our cosine similarity
-def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb, cosine_weights, query_weights):
-    assert len(query_weights) == 9
+def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb, cosine_weights=[1,1,1,1,1,1],
+        query_weights=[1]*12,
+expansion="disease severe acute respiratory syndrome coronavirus treatment virus"):
+    assert len(query_weights) == 12
     assert len(cosine_weights) == 6
+
+    expansion = '' # set expansion to nothing for submission
 
     return {
         "query": {
@@ -26,12 +46,15 @@ def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb, cosine_weights, query_
                             {"match": {"title": {"query": q, "boost": query_weights[0]}}},
                             {"match": {"title": {"query": qstn, "boost": query_weights[1]}}},
                             {"match": {"title": {"query": narr, "boost": query_weights[2]}}},
-                            {"match": {"abstract": {"query": q, "boost": query_weights[3]}}},
-                            {"match": {"abstract": {"query": qstn, "boost": query_weights[4]}}},
-                            {"match": {"abstract": {"query": narr, "boost": query_weights[5]}}},
-                            {"match": {"fulltext": {"query": q, "boost": query_weights[6]}}},
-                            {"match": {"fulltext": {"query": qstn, "boost": query_weights[7]}}},
-                            {"match": {"fulltext": {"query": narr, "boost": query_weights[8]}}},
+                            {"match": {"title": {"query": expansion, "boost": query_weights[3]}}},
+                            {"match": {"abstract": {"query": q, "boost": query_weights[4]}}},
+                            {"match": {"abstract": {"query": qstn, "boost": query_weights[5]}}},
+                            {"match": {"abstract": {"query": narr, "boost": query_weights[6]}}},
+                            {"match": {"abstract": {"query": expansion, "boost": query_weights[7]}}},
+                            {"match": {"fulltext": {"query": q, "boost": query_weights[8]}}},
+                            {"match": {"fulltext": {"query": qstn, "boost": query_weights[9]}}},
+                            {"match": {"fulltext": {"query": narr, "boost": query_weights[10]}}},
+                            {"match": {"fulltext": {"query": expansion, "boost": query_weights[11]}}},
                         ],
                         "filter": {
                             "range": {
@@ -101,10 +124,11 @@ def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb, cosine_weights, query_
         }
     }
 
-async def generate_embedding(bc, text):
+
+@use_memory_cache
+def generate_embedding(bc, text):
     if text:
         # Running sleep here allows us to run all embedding requests at once
-        await asyncio.sleep(0.5)
         arr = np.squeeze(bc.encode([text])).tolist()
         assert len(arr) == 768
 
@@ -114,17 +138,30 @@ async def generate_embedding(bc, text):
     return [0]*768
 
 
-async def run_all_queries(topics, es_client, bert_client, index_name,
-        cosine_weights=[1]*6, query_weights=[1]*9,
-        size=1000, tune:bool=False):
-    for topic_num, topic in tqdm(enumerate(topics, start=1), desc="Running Queries"):
+async def run_all_queries(topics, index_name,
+        cosine_weights, query_weights,
+        size=1000, tune_model:bool=False):
+
+    es_client = Elasticsearch()
+    bert_client = BertClient(port=51234, port_out=51235)
+
+    if tune_model:
+        path = Path('/home/ngu143/Projects/trec_void_neural/assets/rl_labels.txt')
+        assert path.exists()
+        labels_func = memory.cache(hyperparam_utils.read_relevance_labels)
+        labels = labels_func(path)
+
+    moving_average = []
+
+    for topic_num, topic in tqdm(enumerate(topics, start=1), desc="Running Queries",
+            disable=tune_model):
         query = topic['query']
         question = topic['question']
         narrative = topic['narrative']
 
-        query_embedding = await generate_embedding(bert_client, query)
-        question_embedding = await generate_embedding(bert_client, question)
-        narrative_embedding = await generate_embedding(bert_client, narrative)
+        query_embedding = generate_embedding(bert_client, query)
+        question_embedding = generate_embedding(bert_client, question)
+        narrative_embedding = generate_embedding(bert_client, narrative)
 
         final_q = generate_query(query,
                                  question,
@@ -140,10 +177,18 @@ async def run_all_queries(topics, es_client, bert_client, index_name,
 
         # Async query so we can run multiple requests at once
         results = await es_client.search(index=index_name, body=final_q, size=size)
-        if not tune:
+        if not tune_model:
             serialise_results(topic, topic_num, results)
         else:
-            evaluate(topic, topic_num, results)
+            doc_ids = [doc['_source']['id'] for doc in results['hits']['hits']]
+            score = hyperparam_utils.calculate_recall_topic(doc_ids, labels[topic_num])
+            moving_average.append(score)
+            #tune.track.log(moving_average_recall=sum(moving_average)/len(moving_average))
+
+    print(sum(moving_average)/len(moving_average))
+
+    bert_client.close()
+    await es_client.close()
 
 
 def serialise_results(topic, topic_num, results):
@@ -154,6 +199,7 @@ def serialise_results(topic, topic_num, results):
             writer.write(line)
 
 
+@use_memory_cache
 def parse_topics(qt_path):
     all_topics = ET.parse(qt_path).getroot()
     qtopics = [None]*30 # just incase it iterates out of order
@@ -179,41 +225,96 @@ def parse_topics(qt_path):
 
     return qtopics
 
-def tune_wrapper(event_loop, es_client, topics, bc, index_name):
-    def run_query_wrapper(*args, **kwargs):
-        event_loop.run_until_complete(run_all_queries(topics, es_client, bc, index_name))
+
+def run_query_wrapper(kwargs):
+    query_keys = [f'w{i}' for i in range(1, 13)]
+    cosine_keys = [f'w{i}' for i in range(13, 19)]
+    topics = kwargs.pop('topics')
+    index_name = kwargs.pop('index_name')
+    cosine_weights = [kwargs[key] for key in cosine_keys]
+    query_weights = [kwargs[key] for key in query_keys]
+
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(run_all_queries(topics, index_name,
+        cosine_weights, query_weights, size=50, tune_model=True))
+    loop.close()
+
+
+def tune_wrapper(topics, index_name):
+    space = {
+            "w1": hp.uniform('w1', 0.1, 2),
+            "w2": hp.uniform('w2', 0.1, 2),
+            "w3": hp.uniform('w3', 0.1, 2),
+            "w4": hp.uniform('w4', 0.1, 2),
+            "w5": hp.uniform('w5', 0.1, 2),
+            "w6": hp.uniform('w6', 0.1, 2),
+            "w7": hp.uniform('w7', 0.1, 2),
+            "w8": hp.uniform('w8', 0.1, 2),
+            "w9": hp.uniform('w9', 0.1, 2),
+            "w10": hp.uniform('w10', 0.1, 2),
+            "w11": hp.uniform('w11', 0.1, 2),
+            "w12": hp.uniform('w12', 0.1, 2),
+            "w13": hp.uniform('w13', 0.1, 2),
+            "w14": hp.uniform('w14', 0.1, 2),
+            "w15": hp.uniform('w15', 0.1, 2),
+            "w16": hp.uniform('w16', 0.1, 2),
+            "w17": hp.uniform('w17', 0.1, 2),
+            "w18": hp.uniform('w18', 0.1, 2),
+    }
+
+    hyperopt_search = HyperOptSearch(
+            space,
+            max_concurrent=2,
+            reward_attr="moving_average_recall",
+            n_initial_points=60,
+            random_state_seed=42)
+
+    analysis = tune.run(
+        run_query_wrapper,
+        name="tune_covid_MA_RECALL_2",
+        num_samples=2000,
+        resources_per_trial={'cpu':1},
+        scheduler=AsyncHyperBandScheduler(metric="moving_average_recall", mode="max", grace_period=3),
+        search_alg=hyperopt_search,
+        config={'topics': topics, 'index_name': index_name},
+        verbose=1
+    )
+
 
 @plac.annotations(
     query_topics=('path to query topics', 'positional', None, Path),
     index_name=('index name to query', 'option', None, str),
     debug=('index name to query', 'flag'),
-    tune=('path to truth labels', 'positional', None, Path)
+    tune=('perform hyperparameter tuning', 'positional', None, bool),
 )
 def main(query_topics: Path="assets/topics-rnd1.xml",
         index_name: str="covid-april-10-dated",
         debug: bool=False,
-        tune=Path=""):
+        tune=False):
 
     if debug:
         # DEBUG logs shows elasticsearch exceptions
         logging.getLogger().setLevel(logging.DEBUG)
 
     es_client = Elasticsearch(hosts=['localhost'])
-    bc = BertClient(port=51234, port_out=51235)
 
     assert query_topics.exists()
     #assert asyncio.run(index_exists(es_client, index_name))
 
     topics = parse_topics(query_topics)
-    loop = asyncio.get_event_loop()
 
     if tune:
-        tune_wrapper(loop, es_client, topics, bc, index_name)
-    # Run our queries asyncronously as the bottleneck is the queries themselves
-    # While we wait on our queries, we can prepare the next few.
-    loop.run_until_complete(run_all_queries(topics, es_client, bc, index_name))
-    loop.run_until_complete(es_client.transport.close())
-    loop.close()
+        tune_wrapper(topics, index_name)
+    else:
+        # Run our queries asyncronously as the bottleneck is the queries themselves
+        # While we wait on our queries, we can prepare the next few.
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(run_all_queries(topics, index_name,
+            cosine_weights=[1]*6, query_weights=[1]*12))
+        loop.run_until_complete(es_client.transport.close())
+        loop.close()
+
 
 if __name__ == '__main__':
     plac.call(main)

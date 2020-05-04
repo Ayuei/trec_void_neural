@@ -185,7 +185,7 @@ async def run_all_queries(topics, index_name,
             moving_average.append(score)
             #tune.track.log(moving_average_recall=sum(moving_average)/len(moving_average))
 
-    print(sum(moving_average)/len(moving_average))
+    #print(sum(moving_average)/len(moving_average))
 
     bert_client.close()
     await es_client.close()

@@ -8,20 +8,22 @@ class Parser:
 
 class CovidParser(Parser):
     is_str = lambda k: isinstance(k, str)
+    data_path = 'covid-april-10/'
 
     @classmethod
     def parse(cls, row):
-        document = {'id': row['cord_uid']}
+        document = {'id': row['cord_uid'],
+                    'title': row['title']}
 
         if cls.is_str(row['full_text_file']):
             path = None
             if row['has_pmc_xml_parse']:
-                path = 'dataset-week1/' + row['full_text_file'] + \
+                path = cls.data_path + row['full_text_file'] + \
                        '/pmc_json/' + row['pmcid'].split(';')[ 0] +\
                        '.xml.json'
 
-            if row['has_pdf_parse']:
-                path = 'dataset-week1/' + row['full_text_file'] +\
+            elif row['has_pdf_parse']:
+                path = cls.data_path + row['full_text_file'] +\
                        '/pdf_json/' + row['sha'].split(';')[0] +\
                        '.json'
 

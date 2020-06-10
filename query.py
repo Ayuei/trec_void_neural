@@ -27,15 +27,18 @@ def use_memory_cache(func):
 # Final score = log(BM25 of query/question/narrative) + cosine(query, doc_title) + cosine(question, doc_title) + cosine(narr, doc_title)
 # + cosine(query, doc_abstract) + cosine(question, doc_abstract) + cosine(narr, doc_abstract)
 # Log on bm25 is used as it generally gives a score from 0 - 6 which is the range of our cosine similarity
-def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb, cosine_weights=[1,1,1,1,1,1],
+def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb, cosine_weights=[1]*9,
         query_weights=[1]*12,
 expansion="disease severe acute respiratory syndrome coronavirus treatment virus"):
     assert len(query_weights) == 12
-    assert len(cosine_weights) == 6
+    assert len(cosine_weights) == 9
 
     expansion = '' # set expansion to nothing for submission
 
     return {
+        "_source": {
+            "excludes": ["*.abstract_embedding_array", "*.fulltext_embedding_array"]
+        },
         "query": {
             "script_score": {
                 "query": {
@@ -82,9 +85,21 @@ expansion="disease severe acute respiratory syndrome coronavirus treatment virus
                                double q_t = dotProduct(params.q_eb, 'title_embedding');
                                double qstn_t = dotProduct(params.qstn_eb, 'title_embedding');
                                double narr_t = dotProduct(params.narr_eb, 'title_embedding');
+
                                double q_abs = dotProduct(params.q_eb, 'abstract_embedding');
                                double qstn_abs = dotProduct(params.qstn_eb, 'abstract_embedding');
                                double narr_abs = dotProduct(params.narr_eb, 'abstract_embedding');
+
+                               double q_tb = 0.0;
+                               double qstn_tb = 0.0;
+                               double narr_tb = 0.0;
+
+                               try{
+                                    q_tb = dotProduct(params.q_eb, 'fulltext_embedding');
+                                    qstn_tb = dotProduct(params.qstn_eb, 'fulltext_embedding');
+                                    narr_tb = dotProduct(params.narr_eb, 'fulltext_embedding');
+                                } catch(Exception e){
+                                }
 
                                if (Math.signum(q_t) != 0){
                                    q_t = weights[0]*cosineSimilarity(params.q_eb, 'title_embedding');
@@ -110,8 +125,22 @@ expansion="disease severe acute respiratory syndrome coronavirus treatment virus
                                    narr_abs = weights[5]*cosineSimilarity(params.narr_eb, 'abstract_embedding');
                                }
 
-                               return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + Math.log(_score);
+                               if (Math.signum(q_tb) != 0){
+                                   q_tb = weights[6]*cosineSimilarity(params.q_eb, 'fulltext_embedding');
+                               }
 
+                               if (Math.signum(qstn_tb) != 0){
+                                   qstn_tb = weights[7]*cosineSimilarity(params.qstn_eb, 'fulltext_embedding');
+                               }
+
+                               if (Math.signum(narr_tb) != 0){
+                                   narr_tb = weights[8]*cosineSimilarity(params.narr_eb, 'fulltext_embedding');
+                               }
+
+
+                               return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + narr_tb + qstn_tb + q_tb + Math.log(_score)/Math.log(1.66);
+
+// 2.15
                                """,
                     "params": {
                         "q_eb": q_eb,
@@ -140,9 +169,10 @@ def generate_embedding(bc, text):
 
 async def run_all_queries(topics, index_name,
         cosine_weights, query_weights,
-        size=1000, tune_model:bool=False):
+        size=1000, tune_model:bool=False,
+        return_queries=False):
 
-    es_client = Elasticsearch()
+    es_client = await Elasticsearch(timeout=600)
     bert_client = BertClient(port=51234, port_out=51235)
 
     if tune_model:
@@ -152,6 +182,7 @@ async def run_all_queries(topics, index_name,
         labels = labels_func(path)
 
     moving_average = []
+    ret_results = []
 
     for topic_num, topic in tqdm(enumerate(topics, start=1), desc="Running Queries",
             disable=tune_model):
@@ -178,7 +209,14 @@ async def run_all_queries(topics, index_name,
         # Async query so we can run multiple requests at once
         results = await es_client.search(index=index_name, body=final_q, size=size)
         if not tune_model:
-            serialise_results(topic, topic_num, results)
+            if not return_queries:
+                serialise_results(topic, topic_num, results)
+            else:
+                ret_results.append([topic_num,
+                                    query_embedding,
+                                    question_embedding,
+                                    narrative_embedding,
+                                    results])
         else:
             doc_ids = [doc['_source']['id'] for doc in results['hits']['hits']]
             score = hyperparam_utils.calculate_recall_topic(doc_ids, labels[topic_num])
@@ -190,9 +228,11 @@ async def run_all_queries(topics, index_name,
     bert_client.close()
     await es_client.close()
 
+    return ret_results
+
 
 def serialise_results(topic, topic_num, results):
-    with open('results.txt', 'a+') as writer:
+    with open('round_1_results_fulltext.txt', 'a+') as writer:
         for rank, result in enumerate(results['hits']['hits'], start=1):
             doc = result['_source']
             line = f"{topic_num}\tQ0\t{doc['id']}\t{rank}\t{result['_score']}\tINSERT_RUN_NAME\n"
@@ -202,7 +242,7 @@ def serialise_results(topic, topic_num, results):
 @use_memory_cache
 def parse_topics(qt_path):
     all_topics = ET.parse(qt_path).getroot()
-    qtopics = [None]*30 # just incase it iterates out of order
+    qtopics = [None]*len(all_topics.findall('topic')) # just incase it iterates out of order
 
     for topic in all_topics:
         qtopic = {
@@ -219,6 +259,7 @@ def parse_topics(qt_path):
                 # Skip if topic doesn't have that field
                 continue
 
+        print(topic.attrib['number'])
         qtopics[int(topic.attrib['number'])-1] = qtopic
 
     assert not (None in qtopics)
@@ -283,10 +324,10 @@ def tune_wrapper(topics, index_name):
 
 
 @plac.annotations(
-    query_topics=('path to query topics', 'positional', None, Path),
+    query_topics=('path to query topics', 'option', None, Path),
     index_name=('index name to query', 'option', None, str),
-    debug=('index name to query', 'flag'),
-    tune=('perform hyperparameter tuning', 'positional', None, bool),
+    debug=('activate debug logger', 'flag'),
+    tune=('perform hyperparameter tuning', 'flag'),
 )
 def main(query_topics: Path="assets/topics-rnd1.xml",
         index_name: str="covid-april-10-dated",
@@ -297,7 +338,7 @@ def main(query_topics: Path="assets/topics-rnd1.xml",
         # DEBUG logs shows elasticsearch exceptions
         logging.getLogger().setLevel(logging.DEBUG)
 
-    es_client = Elasticsearch(hosts=['localhost'])
+    #es_client = await Elasticsearch(hosts=['localhost'])
 
     assert query_topics.exists()
     #assert asyncio.run(index_exists(es_client, index_name))
@@ -311,8 +352,8 @@ def main(query_topics: Path="assets/topics-rnd1.xml",
         # While we wait on our queries, we can prepare the next few.
         loop = asyncio.get_event_loop()
         loop.run_until_complete(run_all_queries(topics, index_name,
-            cosine_weights=[1]*6, query_weights=[1]*12))
-        loop.run_until_complete(es_client.transport.close())
+            cosine_weights=[1]*9, query_weights=[1]*12))
+        #loop.run_until_complete(es_client.transport.close())
         loop.close()
 
 

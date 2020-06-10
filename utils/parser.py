@@ -44,3 +44,38 @@ class CovidParser(Parser):
             document['date'] = f'{date}-01-01' if len_is_4 else date
 
         return document
+
+class CovidParserNew(CovidParser):
+
+    @classmethod
+    def parse(cls, row):
+        document = {'id': row['cord_uid'],
+                    'title': row['title']}
+
+        path = None
+        if cls.is_str(row['pdf_json_files']):
+            data_row = row['pdf_json_files'].split(';')[0].strip()
+            path = cls.data_path + data_row
+
+        elif cls.is_str(row['pmc_json_files']):
+            data_row = row['pmc_json_files'].split(';')[0].strip()
+            path = cls.data_path + data_row
+
+        if path:
+            content = json.load(open(path))
+            fulltext = '\n'.join([p['text'] for p in content['body_text']])
+            document['fulltext'] = fulltext
+
+        else:
+            document['fulltext'] = ''
+
+        if cls.is_str(row['abstract']):
+            document['abstract']=row['abstract']
+        else:
+            document['abstract']=''
+        if cls.is_str(row['publish_time']):
+            date = row['publish_time']
+            len_is_4 = len(row['publish_time']) == 4
+            document['date'] = f'{date}-01-01' if len_is_4 else date
+
+        return document

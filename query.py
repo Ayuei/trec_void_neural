@@ -1,4 +1,5 @@
 import plac
+import os
 from aioelasticsearch import Elasticsearch
 import asyncio
 from xml.etree import ElementTree as ET
@@ -14,14 +15,7 @@ from ray.tune import track
 from ray import tune
 from ray.tune.suggest.hyperopt import HyperOptSearch
 from ray.tune.schedulers import AsyncHyperBandScheduler
-
-CACHE_DIR='./cache'
-memory = Memory(CACHE_DIR, verbose=0)
-
-
-def use_memory_cache(func):
-    memory_cache_func = memory.cache(func)
-    return memory_cache_func
+from utils.train_utils import QueryWeightTranslator, CosineWeightTranslator, QNorm 
 
 
 # Final score = log(BM25 of query/question/narrative) + cosine(query, doc_title) + cosine(question, doc_title) + cosine(narr, doc_title)
@@ -29,11 +23,11 @@ def use_memory_cache(func):
 # Log on bm25 is used as it generally gives a score from 0 - 6 which is the range of our cosine similarity
 def generate_query(q, qstn, narr, q_eb, qstn_eb, narr_eb, cosine_weights=[1]*9,
         query_weights=[1]*12,
-expansion="disease severe acute respiratory syndrome coronavirus treatment virus"):
+expansion="disease severe acute respiratory syndrome coronavirus treatment virus covid-19 sars-cov-2 covid sars", norm_weight=2.15):
     assert len(query_weights) == 12
     assert len(cosine_weights) == 9
 
-    expansion = '' # set expansion to nothing for submission
+    #expansion = '' # set expansion to nothing for submission
 
     return {
         "_source": {
@@ -82,6 +76,10 @@ expansion="disease severe acute respiratory syndrome coronavirus treatment virus
                                    return 0.0;
                                }
 
+                               if (params.norm_weight < 0.0) {
+                                   return _score;
+                               }
+
                                double q_t = dotProduct(params.q_eb, 'title_embedding');
                                double qstn_t = dotProduct(params.qstn_eb, 'title_embedding');
                                double narr_t = dotProduct(params.narr_eb, 'title_embedding');
@@ -90,71 +88,76 @@ expansion="disease severe acute respiratory syndrome coronavirus treatment virus
                                double qstn_abs = dotProduct(params.qstn_eb, 'abstract_embedding');
                                double narr_abs = dotProduct(params.narr_eb, 'abstract_embedding');
 
-                               double q_tb = 0.0;
-                               double qstn_tb = 0.0;
-                               double narr_tb = 0.0;
+                               //double q_tb = 0.0;
+                               //double qstn_tb = 0.0;
+                               //double narr_tb = 0.0;
 
-                               try{
-                                    q_tb = dotProduct(params.q_eb, 'fulltext_embedding');
-                                    qstn_tb = dotProduct(params.qstn_eb, 'fulltext_embedding');
-                                    narr_tb = dotProduct(params.narr_eb, 'fulltext_embedding');
-                                } catch(Exception e){
-                                }
+                               //try{
+                               //     q_tb = dotProduct(params.q_eb, 'fulltext_embedding');
+                               //     qstn_tb = dotProduct(params.qstn_eb, 'fulltext_embedding');
+                               //     narr_tb = dotProduct(params.narr_eb, 'fulltext_embedding');
+                               // } catch(Exception e){
+                               // }
 
                                if (Math.signum(q_t) != 0){
-                                   q_t = weights[0]*cosineSimilarity(params.q_eb, 'title_embedding');
+                                   q_t = weights[0]*cosineSimilarity(params.q_eb, 'title_embedding') + params.offset;
                                }
 
                                if (Math.signum(qstn_t) != 0){
-                                   qstn_t = weights[1]*cosineSimilarity(params.qstn_eb, 'title_embedding');
+                                   qstn_t = weights[1]*cosineSimilarity(params.qstn_eb, 'title_embedding') + params.offset;
                                }
 
                                if (Math.signum(narr_t) != 0){
-                                   narr_t = weights[2]*cosineSimilarity(params.narr_eb, 'title_embedding');
+                                   narr_t = weights[2]*cosineSimilarity(params.narr_eb, 'title_embedding')+params.offset;
                                }
 
                                if (Math.signum(q_abs) != 0){
-                                   q_abs = weights[3]*cosineSimilarity(params.q_eb, 'abstract_embedding');
+                                   q_abs = weights[3]*cosineSimilarity(params.q_eb, 'abstract_embedding')+params.offset;
                                }
 
                                if (Math.signum(qstn_abs) != 0){
-                                   qstn_abs = weights[4]*cosineSimilarity(params.qstn_eb, 'abstract_embedding');
+                                   qstn_abs = weights[4]*cosineSimilarity(params.qstn_eb, 'abstract_embedding')+params.offset;
                                }
 
                                if (Math.signum(narr_abs) != 0){
-                                   narr_abs = weights[5]*cosineSimilarity(params.narr_eb, 'abstract_embedding');
+                                   narr_abs = weights[5]*cosineSimilarity(params.narr_eb, 'abstract_embedding')+params.offset;
                                }
 
-                               if (Math.signum(q_tb) != 0){
-                                   q_tb = weights[6]*cosineSimilarity(params.q_eb, 'fulltext_embedding');
-                               }
+                               //if (Math.signum(q_tb) != 0){
+                               //    q_tb = weights[6]*cosineSimilarity(params.q_eb, 'fulltext_embedding')+1.0;
+                               //}
 
-                               if (Math.signum(qstn_tb) != 0){
-                                   qstn_tb = weights[7]*cosineSimilarity(params.qstn_eb, 'fulltext_embedding');
-                               }
+                               //if (Math.signum(qstn_tb) != 0){
+                               //    qstn_tb = weights[7]*cosineSimilarity(params.qstn_eb, 'fulltext_embedding')+1.0;
+                               //}
 
-                               if (Math.signum(narr_tb) != 0){
-                                   narr_tb = weights[8]*cosineSimilarity(params.narr_eb, 'fulltext_embedding');
-                               }
+                               //if (Math.signum(narr_tb) != 0){
+                               //    narr_tb = weights[8]*cosineSimilarity(params.narr_eb, 'fulltext_embedding')+1.0;
+                               //}
 
+                               // return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + Math.log(_score)/Math.log(1.66); // 2.15
+                               // return (q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs)/params.divisor + Math.log(_score+1)/Math.log(params.norm_weight); // 2.15 // 1.66
+                               // return Math.log(_score+1)/Math.log(params.norm_weight);
+                               // return (q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs)/params.divisor;
 
-                               return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + narr_tb + qstn_tb + q_tb + Math.log(_score)/Math.log(1.66);
-
-// 2.15
+                               // return _score;
+                               return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + Math.log(_score)/Math.log(params.norm_weight); // 2.15
                                """,
                     "params": {
                         "q_eb": q_eb,
                         "qstn_eb": qstn_eb,
                         "narr_eb": narr_eb,
                         "weights": cosine_weights,
+                        "norm_weight": norm_weight,
+                        "divisor": 1.0,
+                        "offset": 1.0,
                     }
                 }
             }
         }
     }
 
-
-@use_memory_cache
+# @use_memory_cache
 def generate_embedding(bc, text):
     if text:
         # Running sleep here allows us to run all embedding requests at once
@@ -170,15 +173,16 @@ def generate_embedding(bc, text):
 async def run_all_queries(topics, index_name,
         cosine_weights, query_weights,
         size=1000, tune_model:bool=False,
-        return_queries=False):
+        return_queries=False, output_file="results.txt", bert_inport=51234, norm_weight=2.15,
+        qnorm=None):
 
-    es_client = await Elasticsearch(timeout=600)
-    bert_client = BertClient(port=51234, port_out=51235)
+    es_client = Elasticsearch(timeout=600)
+    bert_client = BertClient(port=bert_inport, port_out=bert_inport+1)
 
     if tune_model:
         path = Path('/home/ngu143/Projects/trec_void_neural/assets/rl_labels.txt')
         assert path.exists()
-        labels_func = memory.cache(hyperparam_utils.read_relevance_labels)
+        labels_func = hyperparam_utils.read_relevance_labels
         labels = labels_func(path)
 
     moving_average = []
@@ -186,6 +190,10 @@ async def run_all_queries(topics, index_name,
 
     for topic_num, topic in tqdm(enumerate(topics, start=1), desc="Running Queries",
             disable=tune_model):
+
+        if topic is None:
+            continue
+
         query = topic['query']
         question = topic['question']
         narrative = topic['narrative']
@@ -194,6 +202,9 @@ async def run_all_queries(topics, index_name,
         question_embedding = generate_embedding(bert_client, question)
         narrative_embedding = generate_embedding(bert_client, narrative)
 
+        if qnorm:
+            norm_weight = qnorm.get_norm_weight_by_query(topic_num, estimate_ceiling=False)
+
         final_q = generate_query(query,
                                  question,
                                  narrative,
@@ -201,7 +212,8 @@ async def run_all_queries(topics, index_name,
                                  question_embedding,
                                  narrative_embedding,
                                  cosine_weights,
-                                 query_weights)
+                                 query_weights,
+                                 norm_weight=norm_weight)
 
         logging.debug(f'Running query')
         logging.debug(f'{final_q}')
@@ -210,7 +222,7 @@ async def run_all_queries(topics, index_name,
         results = await es_client.search(index=index_name, body=final_q, size=size)
         if not tune_model:
             if not return_queries:
-                serialise_results(topic, topic_num, results)
+                serialise_results(topic, topic_num, results, output_file)
             else:
                 ret_results.append([topic_num,
                                     query_embedding,
@@ -231,16 +243,21 @@ async def run_all_queries(topics, index_name,
     return ret_results
 
 
-def serialise_results(topic, topic_num, results):
-    with open('round_1_results_fulltext.txt', 'a+') as writer:
+def serialise_results(topic, topic_num, results, output_file):
+    with open(output_file, 'a+') as writer:
         for rank, result in enumerate(results['hits']['hits'], start=1):
             doc = result['_source']
             line = f"{topic_num}\tQ0\t{doc['id']}\t{rank}\t{result['_score']}\tINSERT_RUN_NAME\n"
             writer.write(line)
 
 
-@use_memory_cache
+# @use_memory_cache
 def parse_topics(qt_path):
+    if qt_path.name.endswith(".pkl"):
+        import pickle
+        print("Loading queries from pickle")
+        return pickle.load(qt_path.open('rb'))
+
     all_topics = ET.parse(qt_path).getroot()
     qtopics = [None]*len(all_topics.findall('topic')) # just incase it iterates out of order
 
@@ -259,7 +276,7 @@ def parse_topics(qt_path):
                 # Skip if topic doesn't have that field
                 continue
 
-        print(topic.attrib['number'])
+        # print(topic.attrib['number'])
         qtopics[int(topic.attrib['number'])-1] = qtopic
 
     assert not (None in qtopics)
@@ -328,12 +345,21 @@ def tune_wrapper(topics, index_name):
     index_name=('index name to query', 'option', None, str),
     debug=('activate debug logger', 'flag'),
     tune=('perform hyperparameter tuning', 'flag'),
+    output_file=('output_file', 'option', None, str),
+    bert_inport=('BC port in', 'option', None, int),
+    norm_weight=('BM25 normalization weight', 'option', None, float),
+    exclude=('Exclude facets or query fields', 'option')
 )
 def main(query_topics: Path="assets/topics-rnd1.xml",
         index_name: str="covid-april-10-dated",
         debug: bool=False,
-        tune=False):
+        tune=False,
+        bert_inport=51234,
+        output_file="results.txt",
+        norm_weight=2.15,
+        exclude=None):
 
+    print(norm_weight)
     if debug:
         # DEBUG logs shows elasticsearch exceptions
         logging.getLogger().setLevel(logging.DEBUG)
@@ -350,12 +376,47 @@ def main(query_topics: Path="assets/topics-rnd1.xml",
     else:
         # Run our queries asyncronously as the bottleneck is the queries themselves
         # While we wait on our queries, we can prepare the next few.
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(run_all_queries(topics, index_name,
-            cosine_weights=[1]*9, query_weights=[1]*12))
-        #loop.run_until_complete(es_client.transport.close())
-        loop.close()
 
+        qwt = QueryWeightTranslator()
+        cwt = CosineWeightTranslator()
+
+        if exclude:
+            print("Excluding", exclude)
+            qwt.exclude(exclude)
+            # qwt.exclude(facet="fulltext")
+            # cwt.exclude(exclude)
+
+        cwt.exclude(facet='fulltext')
+        cwt.exclude(facet='title')
+        loop = asyncio.get_event_loop()
+
+        qnorm = None
+        if norm_weight < 0:
+            print("Override: Using automatic normalizer for BM-25 weight")
+            print("Running trial run first to get weights")
+            if os.path.exists("weights_file.temp"):
+                import shutil
+                open("weights_file.temp", 'w+').close() #Empty file
+
+            loop.run_until_complete(run_all_queries(topics, index_name,
+                cosine_weights=cwt.get_all_weights(),
+                query_weights=qwt.get_all_weights(),
+                output_file="weights_file.temp",
+                bert_inport=bert_inport,
+                norm_weight=norm_weight,
+                qnorm=None))
+
+            print("Finished collecting statistics, running")
+            qnorm = QNorm("weights_file.temp", qwt=qwt, cwt=cwt)
+
+        loop.run_until_complete(run_all_queries(topics, index_name,
+            cosine_weights=cwt.get_all_weights(),
+            query_weights=qwt.get_all_weights(),
+            output_file=output_file,
+            bert_inport=bert_inport,
+            norm_weight=norm_weight,
+            qnorm=qnorm))
+        loop.close()
 
 if __name__ == '__main__':
     plac.call(main)

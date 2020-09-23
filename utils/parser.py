@@ -46,7 +46,6 @@ class CovidParser(Parser):
         return document
 
 class CovidParserNew(CovidParser):
-
     @classmethod
     def parse(cls, row):
         document = {'id': row['cord_uid'],

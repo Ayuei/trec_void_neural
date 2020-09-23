@@ -1,6 +1,6 @@
 import pandas as pd
 from aioelasticsearch import Elasticsearch
-from utils.parser import CovidParser as CovidParser
+from utils.parser import CovidParserNew as CovidParser
 import plac
 from pathlib import Path
 from tqdm import tqdm
@@ -16,13 +16,14 @@ logging.basicConfig()
 logging.getLogger().setLevel(logging.WARN)
 
 es_client = Elasticsearch(timeout=600)
-bc = BertClient(port=51234, port_out=51235)
+bc = None
+parsed_fp = None
 
 async def index_documents(parsed_ids, df, index_name, valid_ids):
     nlp = spacy.load("en_core_sci_sm", disable=['ner', 'tagger'])
     nlp.max_length = 2000000
 
-    with open("parsed_docs.txt", 'a+') as logfile:
+    with open(parsed_fp, 'a+') as logfile:
         for _, row in tqdm(df.iterrows(), total=len(valid_ids)):
             doc = None
             _id = row['cord_uid'].strip()
@@ -103,8 +104,8 @@ async def index_documents(parsed_ids, df, index_name, valid_ids):
                 # Embedding is the bottleneck, so we can perform multiple requests before indexing
                 await es_client.index(index=index_name, id=_id, body=doc)
                 logfile.write(f'{_id}\n')
+                logfile.flush()
             except Exception as e:
-                import pdb; pdb.set_trace()
                 print(traceback.format_exc())
                 logging.critical(f"Cannot process doc {_id}")
 
@@ -115,8 +116,8 @@ async def create_es_index(index_file, index_name, delete=False):
         if index_exists:
             if delete:
                 await es_client.indices.delete(index_name)
-                os.remove('parsed_docs.txt')
-                open('parsed_docs.txt', 'w+').close() # create empty file
+                os.remove(parsed_fp)
+                open(parsed_fp, 'w+').close() # create empty file
                 logging.warn('Deleting old index')
             else:
                 return
@@ -130,15 +131,18 @@ async def create_es_index(index_file, index_name, delete=False):
     delete_index=('Delete past index', 'flag', None),
     data_path=("path to the dataset", 'option', None, Path),
     index_name=('Index Name', 'option', None, str),
+    bert_inport=('BC port in', 'option', None, int),
+    bert_outport=('BC port', 'option', None, int),
     valid_id_path=('Path to valid ids', 'option', None, str),
 )
 def main(metafile: Path = Path('covid-april-10/metadata.csv'),
          index_config: Path = Path('assets/es_config.json'),
          delete_index: bool=False,
          index_name: str = 'covid-april-10',
+         bert_inport: int = 51235,
+         bert_outport: int = None,
          data_path: Path= Path("datasets/covid-april-10/"),
          valid_id_path: str = 'covid-april-10/docids-rnd1.txt'):
-
 
     assert metafile.exists()
     assert index_config.exists()
@@ -147,14 +151,22 @@ def main(metafile: Path = Path('covid-april-10/metadata.csv'),
     loop = asyncio.get_event_loop()
     CovidParser.data_path = str(data_path) + "/"
 
+    # Keep a list of parsed documents that we have processed in the event of a crash
+    global parsed_fp
+    parsed_fp = f'parsed_docs_{index_name}.txt'
+    if not os.path.exists(parsed_fp):
+        open(parsed_fp, 'w+') # Create file
+
     loop.run_until_complete(create_es_index(index_config, index_name, delete=delete_index))
     df = pd.read_csv(metafile, index_col=None)
 
-    # Keep a list of parsed documents that we have processed in the event of a crash
-    if not os.path.exists('parsed_docs.txt'):
-        open('parsed_docs.txt', 'w+') # Create file
+    global bc
+    if bert_outport is None:
+        bert_outport = bert_inport+1
 
-    parsed_ids = list(map(lambda k: k.strip(), open('parsed_docs.txt', 'r+').readlines()))
+    bc = BertClient(port=bert_inport, port_out=bert_outport)
+
+    parsed_ids = list(map(lambda k: k.strip(), open(parsed_fp, 'r+').readlines()))
     valid_ids = open(valid_id_path).readlines()
 
     valid_ids = {_id.strip(): True for _id in open(valid_id_path).readlines()}

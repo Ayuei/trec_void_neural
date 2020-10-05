@@ -9,6 +9,9 @@ TBA
 
 ## Models
 ClinicalCovidBERT [https://huggingface.co/manueltonneau/clinicalcovid-bert-nli]
+
 BioBERT STS [https://huggingface.co/clagator/biobert_v1.1_pubmed_nli_sts]
+
 BioBERT msmarco [https://huggingface.co/nboost/pt-biobert-base-msmarco]
+
 CovidBERT [https://huggingface.co/gsarti/covidbert-nli]

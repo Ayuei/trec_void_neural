@@ -89,67 +89,60 @@ expansion="disease severe acute respiratory syndrome coronavirus treatment virus
                                double qstn_abs = dotProduct(params.qstn_eb, 'abstract_embedding');
                                double narr_abs = dotProduct(params.narr_eb, 'abstract_embedding');
 
-                               //double q_tb = 0.0;
-                               //double qstn_tb = 0.0;
-                               //double narr_tb = 0.0;
+                               double q_tb = 0.0;
+                               double qstn_tb = 0.0;
+                               double narr_tb = 0.0;
 
-                               //try{
-                               //     q_tb = dotProduct(params.q_eb, 'fulltext_embedding');
-                               //     qstn_tb = dotProduct(params.qstn_eb, 'fulltext_embedding');
-                               //     narr_tb = dotProduct(params.narr_eb, 'fulltext_embedding');
-                               // } catch(Exception e){
-                               // }
+                               try{
+                                    q_tb = dotProduct(params.q_eb, 'fulltext_embedding');
+                                    qstn_tb = dotProduct(params.qstn_eb, 'fulltext_embedding');
+                                    narr_tb = dotProduct(params.narr_eb, 'fulltext_embedding');
+                                } catch(Exception e){
+                                }
 
                                if (Math.signum(q_t) != 0){
-                                   q_t = weights[0]*cosineSimilarity(params.q_eb, 'title_embedding') + params.offset;
+                                   q_t = weights[0]*cosineSimilarity(params.q_eb, 'title_embedding') + params.offset*weights[0];
                                }
 
                                if (Math.signum(qstn_t) != 0){
-                                   qstn_t = weights[1]*cosineSimilarity(params.qstn_eb, 'title_embedding') + params.offset;
+                                   qstn_t = weights[1]*cosineSimilarity(params.qstn_eb, 'title_embedding') + params.offset*weights[1];
                                }
 
                                if (Math.signum(narr_t) != 0){
-                                   narr_t = weights[2]*cosineSimilarity(params.narr_eb, 'title_embedding')+params.offset;
+                                   narr_t = weights[2]*cosineSimilarity(params.narr_eb, 'title_embedding')+params.offset*weights[2];
                                }
 
                                if (Math.signum(q_abs) != 0){
-                                   q_abs = weights[3]*cosineSimilarity(params.q_eb, 'abstract_embedding')+params.offset;
+                                   q_abs = weights[3]*cosineSimilarity(params.q_eb, 'abstract_embedding')+params.offset*weights[3];
                                }
 
                                if (Math.signum(qstn_abs) != 0){
-                                   qstn_abs = weights[4]*cosineSimilarity(params.qstn_eb, 'abstract_embedding')+params.offset;
+                                   qstn_abs = weights[4]*cosineSimilarity(params.qstn_eb, 'abstract_embedding')+params.offset*weights[4];
                                }
 
                                if (Math.signum(narr_abs) != 0){
-                                   narr_abs = weights[5]*cosineSimilarity(params.narr_eb, 'abstract_embedding')+params.offset;
+                                   narr_abs = weights[5]*cosineSimilarity(params.narr_eb, 'abstract_embedding')+params.offset*weights[5];
                                }
 
-                               //if (Math.signum(q_tb) != 0){
-                               //    q_tb = weights[6]*cosineSimilarity(params.q_eb, 'fulltext_embedding')+1.0;
-                               //}
+                               if (Math.signum(q_tb) != 0){
+                                   q_tb = weights[6]*cosineSimilarity(params.q_eb, 'fulltext_embedding')+1.0*weights[6];
+                               }
 
-                               //if (Math.signum(qstn_tb) != 0){
-                               //    qstn_tb = weights[7]*cosineSimilarity(params.qstn_eb, 'fulltext_embedding')+1.0;
-                               //}
+                               if (Math.signum(qstn_tb) != 0){
+                                   qstn_tb = weights[7]*cosineSimilarity(params.qstn_eb, 'fulltext_embedding')+1.0*weights[7];
+                               }
 
-                               //if (Math.signum(narr_tb) != 0){
-                               //    narr_tb = weights[8]*cosineSimilarity(params.narr_eb, 'fulltext_embedding')+1.0;
-                               //}
+                               if (Math.signum(narr_tb) != 0){
+                                   narr_tb = weights[8]*cosineSimilarity(params.narr_eb, 'fulltext_embedding')+1.0*weights[8];
+                               }
 
-                               // return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + Math.log(_score)/Math.log(1.66); // 2.15
-                               // return (q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs)/params.divisor + Math.log(_score+1)/Math.log(params.norm_weight); // 2.15 // 1.66
-                               // return Math.log(_score+1)/Math.log(params.norm_weight);
-                               // return (q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs)/params.divisor;
-
-                               // return _score;
-                               return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs - params.reduce_offset + Math.log(_score)/Math.log(params.norm_weight); // 2.15
+                               return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + Math.log(_score)/Math.log(params.norm_weight); // 2.15
                                """,
                     "params": {
                         "q_eb": q_eb,
                         "qstn_eb": qstn_eb,
                         "narr_eb": narr_eb,
                         "weights": cosine_weights,
-                        "reduce_offset": len(cosine_weights)-sum(cosine_weights),
                         "norm_weight": norm_weight,
                         "divisor": 1.0,
                         "offset": 1.0,
@@ -174,7 +167,7 @@ def generate_embedding(bc, text):
 
 async def run_all_queries(topics, index_name,
         cosine_weights, query_weights,
-        size=2383, tune_model:bool=False,
+        size=2390, tune_model:bool=False,
         return_queries=False, output_file="results.txt", bert_inport=51234, norm_weight=2.15,
         qnorm=None):
 

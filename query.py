@@ -15,7 +15,7 @@ from ray.tune import track
 from ray import tune
 from ray.tune.suggest.hyperopt import HyperOptSearch
 from ray.tune.schedulers import AsyncHyperBandScheduler
-from utils.train_utils import QueryWeightTranslator, CosineWeightTranslator, QNorm 
+from utils.train_utils import QueryWeightTranslator, CosineWeightTranslator, QNorm
 
 
 # Final score = log(BM25 of query/question/narrative) + cosine(query, doc_title) + cosine(question, doc_title) + cosine(narr, doc_title)
@@ -27,7 +27,8 @@ expansion="disease severe acute respiratory syndrome coronavirus treatment virus
     assert len(query_weights) == 12
     assert len(cosine_weights) == 9
 
-    #expansion = '' # set expansion to nothing for submission
+
+    expansion = '' # set expansion to nothing for submission
 
     return {
         "_source": {
@@ -141,13 +142,14 @@ expansion="disease severe acute respiratory syndrome coronavirus treatment virus
                                // return (q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs)/params.divisor;
 
                                // return _score;
-                               return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs + Math.log(_score)/Math.log(params.norm_weight); // 2.15
+                               return q_t + qstn_t + narr_t + q_abs + qstn_abs + narr_abs - params.reduce_offset + Math.log(_score)/Math.log(params.norm_weight); // 2.15
                                """,
                     "params": {
                         "q_eb": q_eb,
                         "qstn_eb": qstn_eb,
                         "narr_eb": narr_eb,
                         "weights": cosine_weights,
+                        "reduce_offset": len(cosine_weights)-sum(cosine_weights),
                         "norm_weight": norm_weight,
                         "divisor": 1.0,
                         "offset": 1.0,
@@ -172,7 +174,7 @@ def generate_embedding(bc, text):
 
 async def run_all_queries(topics, index_name,
         cosine_weights, query_weights,
-        size=1000, tune_model:bool=False,
+        size=2383, tune_model:bool=False,
         return_queries=False, output_file="results.txt", bert_inport=51234, norm_weight=2.15,
         qnorm=None):
 
@@ -348,6 +350,7 @@ def tune_wrapper(topics, index_name):
     output_file=('output_file', 'option', None, str),
     bert_inport=('BC port in', 'option', None, int),
     norm_weight=('BM25 normalization weight', 'option', None, float),
+    bm25_only=('BM25 results only', 'flag'),
     exclude=('Exclude facets or query fields', 'option')
 )
 def main(query_topics: Path="assets/topics-rnd1.xml",
@@ -357,6 +360,7 @@ def main(query_topics: Path="assets/topics-rnd1.xml",
         bert_inport=51234,
         output_file="results.txt",
         norm_weight=2.15,
+        bm25_only: bool=False,
         exclude=None):
 
     print(norm_weight)
@@ -391,7 +395,7 @@ def main(query_topics: Path="assets/topics-rnd1.xml",
         loop = asyncio.get_event_loop()
 
         qnorm = None
-        if norm_weight < 0:
+        if norm_weight < 0 or bm25_only:
             print("Override: Using automatic normalizer for BM-25 weight")
             print("Running trial run first to get weights")
             if os.path.exists("weights_file.temp"):
@@ -408,6 +412,13 @@ def main(query_topics: Path="assets/topics-rnd1.xml",
 
             print("Finished collecting statistics, running")
             qnorm = QNorm("weights_file.temp", qwt=qwt, cwt=cwt)
+
+        if bm25_only:
+            print("Yielding only bm25 results")
+            import shutil
+            shutil.move("weights_file.temp", output_file)
+            loop.close()
+            import sys; sys.exit(0)
 
         loop.run_until_complete(run_all_queries(topics, index_name,
             cosine_weights=cwt.get_all_weights(),
